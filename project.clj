@@ -8,6 +8,6 @@
 
   :source-paths ["src/clj" "src/jvm"]
   :java-source-paths ["src/jvm" "test/jvm"]
-  :test-paths   ["test/clj" "test/jvm"]
+  :test-paths   ["test/clj" "test/jvm" "test/defs" "test/gold_standard"]
 
   )
