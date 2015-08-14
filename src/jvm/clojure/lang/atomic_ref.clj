@@ -17,6 +17,6 @@
   ([value]
    `(AtomicReference. ~value)))
 
-(defmacro new-atomic-long [l]
-  `(AtomicLong. ~l))
-
+(defmacro new-atomic-long
+  ([] `(AtomicLong.))
+  ([l] `(AtomicLong. ~l)))

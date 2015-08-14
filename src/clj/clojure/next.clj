@@ -1273,6 +1273,44 @@
             (swap! cache-atom assoc args return-value)
             return-value))))))
 
+(require ['clojure.lang.ref :refer ['new-ref '-get-min-history '-set-min-history '-get-max-history '-set-max-history]])
+
+(defn ref
+  ([state]
+   (ref state :max-history nil :min-history nil))
+  ([state & args]
+   (let [config (apply array-map args)]
+     (setup-reference
+       (new-ref (new-atomic-ref state)
+                nil
+                nil
+                {}
+                (get config :min-history)
+                (get config :max-history))
+       config))))
+
+(defn ref-min-history
+  ([ref]
+   (-get-min-history ref))
+  ([ref n]
+   (-set-min-history ref n)))
+
+(defn ref-max-history
+  ([ref]
+   (-get-max-history ref))
+  ([ref n]
+   (-set-max-history ref n)))
+
+(require ['clojure.lang.stm :as stm])
+
+(defmacro sync [flags & body]
+  (stm/run-in-transaction (fn [] ~@body)))
+
+(defmacro dosync [& body]
+  `(sync nil ~@body))
+
+(defmacro io! [& body])
+
 (require ['clojure.lang.future :refer         ['new-future]])
 (require ['clojure.lang.future-submission :as 'future-submission])
 

@@ -15,7 +15,7 @@
 ; This allows us to avoid implementing LockingTransaction right
 ; now. We'll need to revisit at some point.
 (def ^{:private true} locking-transaction
-  (let [field (.getDeclaredField  clojure.lang.LockingTransaction "transaction")]
+  (let [field (.getDeclaredField clojure.lang.LockingTransaction "transaction")]
     (.setAccessible field true)
     (.get (.get field clojure.lang.LockingTransaction))))
 
