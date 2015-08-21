@@ -1301,7 +1301,7 @@
   ([ref n]
    (-set-max-history ref n)))
 
-(require ['clojure.lang.stm :as stm])
+(require ['clojure.lang.stm :as 'stm])
 
 (defmacro sync [flags & body]
   (stm/run-in-transaction (fn [] ~@body)))

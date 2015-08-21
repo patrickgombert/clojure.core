@@ -5,7 +5,7 @@
             [clojure.lang.exceptions :refer [new-illegal-state-error]]
             [clojure.lang.protocols  :refer [IComparable IDeref IMeta IReference
                                              IValidatable IWatchable]]
-            [clojure.lang.stm        :as [stm]]
+            [clojure.lang.stm        :as stm]
             [clojure.next            :refer :all :exclude [cons]]))
 
 (def ^:private MIN-HISTORY 0)
@@ -28,7 +28,8 @@
               ^:volatile-mutable -validator
               ^:volatile-mutable -watches
               ^:volatile-mutable -min-history
-              ^:volatile-mutable -max-history]
+              ^:volatile-mutable -max-history
+              lock]
 
   IHistory
   (-get-history-count [this])
@@ -49,10 +50,7 @@
   (-compare-to [this other])
 
   IDeref
-  (-deref [this]
-    (if (stm/running)
-      (ref-get -state)
-      (stm/do-get this)))
+  (-deref [this])
 
   IMeta
   (-meta [this] -meta)
@@ -91,4 +89,11 @@
 (defn -ensure [ref])
 
 (defn new-ref [state meta validator watches min-history max-history]
-  (Ref. state meta validator watches (or min-history MIN-HISTORY) (or max-history MAX-HISTORY)))
+  (Ref.
+    state
+    meta
+    validator
+    watches
+    (or min-history MIN-HISTORY)
+    (or max-history MAX-HISTORY)
+    nil))

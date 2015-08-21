@@ -1,4 +1,5 @@
-(ns clojure.lang.exceptions)
+(ns clojure.lang.exceptions
+  (:import [clojure.lang.platform RetryException]))
 
 (def argument-error IllegalArgumentException)
 
@@ -41,6 +42,11 @@
 
 (defmacro new-class-cast-exception [& args]
   (list* 'new class-cast-exception args))
+
+(def retry-exception RetryException)
+
+(defmacro new-retry-exception [& args]
+  (list* 'new retry-exception args))
 
 (def runtime-exception RuntimeException)
 
