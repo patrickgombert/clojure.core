@@ -1,29 +1,30 @@
 (ns clojure.lang.stm
-  (:refer-clojure :only [defn defn- deftype defprotocol apply cond let loop pos? doseq -> when when-not when-let locking])
-  (:require [clojure.lang.atomic-ref :refer [new-atomic-ref ref-set!
-                                             ref-get ref-compare-and-set!
-                                             new-atomic-long]]
-            [clojure.lang.atomic-counter :refer [new-atomic-counter get-and-increment-atomic-counter]]
-            [clojure.lang.atomic-ref :refer [ref-get ref-compare-and-set!]]
-            [clojure.lang.exceptions :refer [platform-try new-retry-exception retry-exception]]
-            [clojure.lang.lock :refer [new-read-write-lock get-read-lock get-write-lock lock unlock]]
-            [clojure.lang.persistent-list :refer [EMPTY-LIST]]
-            [clojure.lang.persistent-hash-map :refer [EMPTY-HASH-MAP]]
-            [clojure.lang.persistent-sorted-map :refer [EMPTY-SORTED-MAP]]
-            [clojure.lang.thread     :refer [local-state get-local-state set-local-state
-                                             new-countdown-latch latch-countdown]]
-            [clojure.next            :refer :all :exclude [cons]]))
+  (:refer-clojure :only [defn defn- deftype defprotocol apply cond let loop doseq -> when when-not when-let locking])
+  (:require [clojure.lang
+              [atomic-ref :refer [new-atomic-ref ref-set!
+                                  ref-get ref-compare-and-set!
+                                  new-atomic-long]]
+              [atomic-counter        :refer [new-atomic-counter get-atomic-counter
+                                             get-and-increment-atomic-counter set-atomic-counter]]
+              [exceptions            :refer [platform-try new-retry-exception retry-exception
+                                             new-illegal-state-error]]
+              [lock                  :refer [new-read-write-lock get-read-lock get-write-lock lock unlock]]
+              [persistent-list       :refer [EMPTY-LIST]]
+              [persistent-hash-map   :refer [EMPTY-HASH-MAP]]
+              [persistent-sorted-map :refer [EMPTY-SORTED-MAP]]
+              [thread                :refer :all]]
+            [clojure.next :refer :all :exclude [cons]]))
 
-(def ^{:private true} RUNNING 0)
-(def ^{:private true} COMMITTING 1)
-(def ^{:private true} RETRY 2)
-(def ^{:private true} KILLED 3)
-(def ^{:private true} COMMITTED 4)
+(def ^:private RUNNING 0)
+(def ^:private COMMITTING 1)
+(def ^:private RETRY 2)
+(def ^:private KILLED 3)
+(def ^:private COMMITTED 4)
 
-(def ^{:private true} BARGE-WAIT-NANOS (* 10 1000000))
-(def ^{:private true} RETRY-LIMIT 1000)
+(def ^:private BARGE-WAIT-NANOS (* 10 1000000))
+(def ^:private RETRY-LIMIT 1000)
 
-(def ^{:private true} transaction (local-state))
+(def ^:private transaction (local-state))
 
 ; TO DO
 (defn point [tvals])
@@ -63,12 +64,14 @@
   (-set-info [this i])
   (-set-vals [this v])
 
+  (do-get [this ref])
+
   (get-info [this])
   (barge [this info])
   (release-if-ensured [this ref])
   (stop [this status])
   (try-write-lock [this ref])
-  (run [this fn]))
+  (run [this f]))
 
 (deftype Transaction
   [last-point
@@ -80,10 +83,10 @@
    ^:volatile-mutable sets
    ^:volatile-mutable commutes
    ^:volatile-mutable ensures
-   ^:volatile-mutable info]
+   ^:volatile-mutable -info]
 
   ITransaction
-  (get-info [this])
+  (get-info [this] -info)
 
   (barge [this info]
     (if (and (> (- (nano-time) start-time) BARGE-WAIT-NANOS)
@@ -102,11 +105,11 @@
           unlock)))
 
   (stop [this status]
-    (when info
-      (locking info
-        (set! (.status info) status)
-        (latch-countdown (.latch info)))
-      (set! info nil)
+    (when -info
+      (locking -info
+        (set! (.status -info) status)
+        (latch-countdown (.latch -info)))
+      (set! -info nil)
       (set! vals (empty vals))
       (set! sets (empty sets))
       (set! commutes (empty commutes))))
@@ -116,23 +119,53 @@
   (-set-read-point [this rp] (set! read-point rp))
   (-set-start-point [this sp] (set! start-point sp))
   (-set-start-time [this st] (set! start-time st))
-  (-set-info [this i] (set! info i))
+  (-set-info [this i] (set! -info i))
   (-set-vals [this v] (set! vals v))
 
-  (run [this fn]
+  (do-get [this r]
+    (when (not (running? -info))
+      (throw (new-retry-exception)))
+    (if (contains? vals r)
+      (get vals r)
+      (try
+        (lock (get-read-lock (.lock r)))
+        (when (nil? (.tvals r))
+          (throw (new-illegal-state-error (str r " is unbound."))))
+        (let [ver (.tvals r)
+              ret (loop [v (.prior ver)]
+                    (cond
+                      (<= (.point ver) read-point)
+                        (.val v)
+                      (= ver (.tvals r))
+                        (recur (.prior ver))
+                      :else
+                        nil))]
+          (if ret
+            ret
+            (do
+              (get-and-increment-atomic-counter (._faults r))
+              (throw (new-retry-exception)))))
+        (finally
+          (unlock (get-read-lock (.lock r)))))))
+
+  (run [this f]
     (let [done (atom nil)
           ret (atom nil)
           notifies (atom EMPTY-LIST)
           locked (atom EMPTY-LIST)]
       (loop [i 0]
+        ; We'ere invoking functions on 'this' inside of the try clause
+        ; because there seems to be a scoping bug. It claims that the
+        ; mutable fields are not mutable and invoking functions seem
+        ; to get around that.
         (platform-try
-          (-set-read-point read-point (get-and-increment-atomic-counter last-point))
+          (-set-read-point this (get-and-increment-atomic-counter last-point))
           (when (= i 0)
-            (-set-start-point start-point read-point)
-            (-set-start-time start-time (nano-time)))
-          (-set-info info (new-info RUNNING start-point))
-          (reset! ret (fn))
-          (when (ref-compare-and-set! (.status info) RUNNING COMMITTING)
+            (-set-start-point this read-point)
+            (-set-start-time this (nano-time)))
+          (-set-info this (new-info RUNNING start-point))
+          (reset! ret (f))
+          (when (ref-compare-and-set! (.status (get-info this)) RUNNING COMMITTING)
             (doseq [[ref fns] commutes]
               (when-not (contains? sets ref)
                 (let [was-ensured (contains? ensures ref)]
@@ -142,16 +175,18 @@
                   (when (and was-ensured (.tvals ref) (> (point (.tvals ref)) read-point))
                     (throw (new-retry-exception))))
                 (let [refinfo '(tinfo ref)]
-                  (when (and refinfo (not= refinfo info) (running? refinfo))
+                  (when (and refinfo (not= refinfo -info) (running? refinfo))
                     (when-not (barge this refinfo)
                       (throw (new-retry-exception)))))
                 (let [val (when-let [tval (.tvals ref)] (val tval))]
                   (-set-vals vals (assoc vals ref val)))
                 (doseq [f fns]
                   (-set-vals vals (assoc vals ref (apply (get vals ref) (:args f)))))))
-            (doseq [ref sets]
-              (try-write-lock this ref)
-              (swap! locked #(conj % ref)))
+            (loop [r (seq sets)]
+              (when r
+                (try-write-lock this (first r))
+                (swap! locked #(conj % (first r)))
+                (recur (next r))))
             (doseq [[ref entry] vals]
               (validate ref (get-validator ref) entry))
             (let [commit-point (get-and-increment-atomic-counter last-point)]
@@ -172,10 +207,10 @@
                   (when (seq (get-watches ref))
                     (swap! notifies #(conj % (new-notify ref oldval entry)))))))
             (reset! done true)
-            (set! (.status info) COMMITTED))
+            (set-atomic-counter (.status (get-info this)) COMMITTED))
           (platform-catch retry-exception e)
           (finally
-            (doseq [r @locked]
+            (doseq [r (deref locked)]
               (-> r
                   get-lock
                   write-lock
@@ -186,21 +221,27 @@
                   get-read-lock
                   unlock))
             (set! ensures (empty ensures))
-            (stop this (if @done COMMITTED RETRY))
+            (stop this (if (deref done) COMMITTED RETRY))
             (try
-              (if @done
-                (doseq [n @notifies]
+              (if (deref done)
+                (doseq [n (deref notifies)]
                   (notify-watches (:ref n) (:oldval n) (:newval n)))
                 (doseq [a actions]
                   (dispatch-action a)))
               (finally
                 (swap! notifies empty)
                 (set! actions (empty actions))))))
-        (if @done
-          @ret
+        (if (deref done)
+          (deref ret)
           (if (< i RETRY-LIMIT)
             (recur (inc i))
             (throw "Transaction failed after reaching retry limit")))))))
+
+(defn get-running []
+  (let [t (get-local-state transaction)]
+    (if (or (nil? t) (nil? (get-info t)))
+      nil
+      t)))
 
 (defn new-transaction []
   (Transaction.
@@ -217,12 +258,18 @@
 
 (defn run-in-transaction [fn]
   (let [t (get-local-state transaction)]
-    (if t
+    (if (nil? t)
       (do
-        (set-local-state transaction (new-transaction))
-        (let [ret (run t fn)]
-          (set-local-state transaction nil)
-          ret))
+        (let [t (new-transaction)
+              _ (set-local-state transaction t)
+              ret (run t fn)]
+          (try
+            (set-local-state transaction nil)
+            (finally
+              (do
+                (remove-local-state transaction)
+                ret)))))
       (if (get-info t)
         (fn)
         (run t fn)))))
+

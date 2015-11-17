@@ -17,6 +17,9 @@
 (defmacro set-local-state [state v]
   `(.set ~state ~v))
 
+(defmacro remove-local-state [state]
+  `(.remove ~state))
+
 (defmacro thread-reference []
   `(. Thread currentThread))
 

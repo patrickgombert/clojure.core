@@ -1,5 +1,5 @@
 (ns clojure.lang.ref-test
-  (:refer-clojure :only [defmacro fn let list list* pos?])
+  (:refer-clojure :only [defmacro fn let list list*])
   (:require [clojure.test            :refer :all]
             [clojure.lang.exceptions :refer [illegal-state-error]]
             [clojure.next            :refer :all :exclude []]))
